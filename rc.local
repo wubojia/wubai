@@ -1,0 +1,70 @@
+touch /var/lock/subsys/local
+
+echo "1" > /proc/sys/net/ipv4/ip_forward
+/sbin/iptables -A FORWARD -p tcp --syn -m limit --limit 1/s -j ACCEPT
+
+/sbin/iptables -t nat -A POSTROUTING -s 192.168.2.0/255.255.255.0 -o eth0 -j SNAT --to-source 192.168.1.4
+
+
+/sbin/iptables -t nat -A PREROUTING -i eth1 -p tcp --dport 80 -j REDIRECT --to-ports 3128
+
+
+#定义开始ip地址段,起始ip,ip地址数
+ipseg="192.168.2."
+ipstart=20
+ipcounter=15
+#定义下载总带宽
+dnwid="2600Kbit"
+#定义上传总带宽
+upwid="600Kbit"
+#定义下载带宽
+ipdn="350Kbit"
+#定义上传带宽
+ipup="150Kbit"
+#上传设备
+upeq="eth0"
+#下载设备
+dneq="eth1"
+#清空队列
+/sbin/tc qdisc del dev $dneq root 2>/dev/null>/dev/null
+#******************下载限止速度***************************
+#创建句柄
+/sbin/tc qdisc add dev $dneq root handle 1: htb default 30
+#创建下载类
+/sbin/tc class add dev $dneq parent 1: classid 1:1 htb rate $dnwid burst 15K
+counter=1
+while [ $counter -lt `expr $ipcounter + 1` ]
+do
+/sbin/tc class add dev $dneq parent 1:1 classid 1:1$counter htb rate $ipdn burst 15K
+/sbin/tc qdisc add dev $dneq parent 1:1$counter handle 1$counter: sfq perturb 10
+ipadd=`expr $ipstart - 1 + $counter`
+/sbin/tc filter add dev $dneq protocol ip parent 1:0 prio 50 u32 match ip dst $ipseg$ipadd/32 flowid 1:1$counter
+counter=`expr $counter + 1`
+done
+#**********************限止上传速度**************************
+#***********************************************
+#启动花生客
+counter=1
+while [ $counter -lt `expr $ipcounter + 1` ]
+do
+ipadd=`expr $ipstart - 1 + $counter`
+/sbin/iptables -A PREROUTING -t mangle -i $dneq -s $ipseg$ipadd -j MARK --set-mark 2$counter
+/sbin/iptables -A OUTPUT -t mangle -o $dneq -s $ipseg$ipadd -j MARK --set-mark 2$counter
+counter=`expr $counter + 1`
+done
+#*********************************************************
+/sbin/tc qdisc add dev $upeq root handle 1: htb default 30
+/sbin/tc class add dev $upeq parent 1: classid 1:1 htb rate $upwid burst 15K
+
+counter=1
+while [ $counter -lt `expr $ipcounter + 1` ]
+do
+ipadd=`expr $ipstart - 1 + $counter`
+
+/sbin/tc class add dev $upeq parent 1:1 classid 1:2$counter htb rate $ipup burst 15K
+/sbin/tc qdisc add dev $upeq parent 1:2$counter handle 2$counter: sfq perturb 10
+/sbin/tc filter add dev $upeq parent 1:0 protocol ip prio $counter handle 2$counter fw classid 1:2$counter
+counter=`expr $counter + 1` 
+done
+
+/usr/local/phlinux/phlinux -d
